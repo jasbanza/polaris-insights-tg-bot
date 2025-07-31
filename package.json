@@ -1,0 +1,27 @@
+{
+  "name": "polaris-insights-tg-bot",
+  "version": "1.0.0",
+  "description": "Polaris insights tg bot",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasbanza/polaris-insights-tg-bot.git"
+  },
+  "author": "jasbanza",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jasbanza/polaris-insights-tg-bot/issues"
+  },
+  "homepage": "https://github.com/jasbanza/polaris-insights-tg-bot#readme",
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "js-console-log-colors": "^1.1.0",
+    "node-fetch": "^2.7.0"
+  }
+}
