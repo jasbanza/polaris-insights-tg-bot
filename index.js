@@ -52,37 +52,10 @@ const config = {
             throw new Error(`Missing required environment variables: TELEGRAM_TOKEN and/or TELEGRAM_CHAT_ID`);
         }
 
-        // Fetch the latest published insight
-        const insight = await getLastPublishedInsight();
-        if (!insight) {
-            out.error(`No insights found`);
-            return;
-        }
+        // Process multiple new insights
+        await processNewPublishedInsights();
 
-        // Check if the insight has already been sent by comparing with cache
-        const cache_latestInsight = readCache({ filename: config.Cache.FILENAME });
-
-        if (!cache_latestInsight || !cache_latestInsight.id) {
-            out.warn(`No cache found. Sending the latest insight: ${insight.id}`);
-        } else if (cache_latestInsight.id === insight.id) {
-            out.info(`No new insights. Latest sent ID: ${insight.id}`);
-            return;
-        }
-
-        // Send the new insight to Telegram
-        const response = await sendMessage({
-            insight: insight
-        });
-
-        out.success(`Message sent successfully: ${response.ok ? 'OK' : response}`);
-
-        // Update cache with the latest insight to prevent duplicate sends
-        writeCache({
-            id: insight.id,
-            publishedAt: insight.publishedAt,
-            headline: insight.headline,
-            sentAt: new Date().toISOString()
-        }, { filename: config.Cache.FILENAME });
+        out.success(`Finished processing insights`);
 
     } catch (error) {
         out.error(`Error in main execution: ${error.message}`);
@@ -138,6 +111,90 @@ function writeCache(data, { filename = 'cache.json' } = {}) {
         }
     } catch (error) {
         out.error(`Error writing cache: ${error.message}`);
+    }
+}
+
+/**
+ * Fetches new published insights and sends them to Telegram
+ * Processes up to 5 latest insights, checking each against cache
+ * @returns {Promise<void>}
+ */
+async function processNewPublishedInsights() {
+    try {
+        const url = `${config.Polaris.API_URL}/ai/curated-insights?_sort=publishedAt&_order=desc&_limit=5`;
+        out.info(`Fetching latest 5 insights from: ${url}`);
+
+        const response = await fetch(url);
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const insights = await response.json();
+
+        if (!insights || insights.length === 0) {
+            out.warn(`No insights available from API`);
+            return;
+        }
+
+        out.info(`Found ${insights.length} insights to process`);
+
+        // Process each insight
+        let processedCount = 0;
+        for (const insight of insights) {
+            try {
+                // Check if this insight has already been sent by comparing publishedAt dates
+                const cache_latestInsight = readCache({ filename: config.Cache.FILENAME });
+
+                if (cache_latestInsight && cache_latestInsight.publishedAt) {
+                    const cachedDate = new Date(cache_latestInsight.publishedAt);
+                    const insightDate = new Date(insight.publishedAt);
+                    
+                    if (insightDate <= cachedDate) {
+                        out.info(`Insight ${insight.id} (published: ${insight.publishedAt}) already processed (cached: ${cache_latestInsight.publishedAt}), skipping`);
+                        continue;
+                    }
+                }
+
+                out.info(`Processing new insight: ${insight.id} (published: ${insight.publishedAt})`);
+
+                // Send the insight to Telegram
+                const response = await sendMessage({
+                    insight: insight
+                });
+
+                // Check if the message was sent successfully
+                if (!response || !response.ok) {
+                    throw new Error(`Telegram message failed: ${response?.description || 'Unknown error'}`);
+                }
+
+                out.success(`Message sent successfully for insight ${insight.id}`);
+
+                // Update cache only after successful message send
+                writeCache({
+                    id: insight.id,
+                    publishedAt: insight.publishedAt,
+                    sentAt: new Date().toISOString()
+                }, { filename: config.Cache.FILENAME });
+
+                processedCount++;
+
+                // Add delay only if there are more insights to process
+                if (processedCount < insights.length) {
+                    out.info(`Waiting 1 second before processing next insight...`);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+
+            } catch (error) {
+                out.error(`Error processing insight ${insight.id}: ${error.message}`);
+                // Continue with next insight instead of stopping
+                continue;
+            }
+        }
+
+    } catch (error) {
+        out.error(`Error fetching new published insights: ${error.message}`);
+        throw error;
     }
 }
 
