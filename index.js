@@ -78,12 +78,12 @@ function readCache({ filename = 'cache.json' }) {
         out.info(`Current working directory: ${process.cwd()}`);
         out.info(`Attempting to read cache file: ${filename}`);
         out.info(`File exists: ${fs.existsSync(filename)}`);
-        
+
         if (!fs.existsSync(filename)) {
             out.warn(`Cache file does not exist: ${filename}`);
             return {};
         }
-        
+
         const data = fs.readFileSync(filename, 'utf8');
         const parsed = JSON.parse(data);
         out.info(`Cache loaded successfully from: ${filename}`);
@@ -105,7 +105,7 @@ function writeCache(data, { filename = 'cache.json' } = {}) {
         out.info(`Writing cache to: ${filename}`);
         fs.writeFileSync(filename, JSON.stringify(data, null, 2));
         out.info(`Cache updated successfully: ${filename}`);
-        
+
         // Verify the file was written
         if (fs.existsSync(filename)) {
             out.success(`Cache file verified: ${filename}`);
@@ -122,7 +122,7 @@ function writeCache(data, { filename = 'cache.json' } = {}) {
  * Processes up to 5 latest insights, checking each against cache
  * @returns {Promise<void>}
  */
-async function processNewPublishedInsights({limit = 5}) {
+async function processNewPublishedInsights({ limit = 5 }) {
     try {
         const url = `${config.Polaris.API_URL}/ai/curated-insights?_sort=publishedAt&_order=desc&_end=${limit}`;
         out.info(`Fetching latest ${limit} insights from: ${url}`);
@@ -140,11 +140,15 @@ async function processNewPublishedInsights({limit = 5}) {
             return;
         }
 
-        out.info(`Found ${insights.length} insights to process`);
+        // Reverse the insights array to process from oldest to newest
+        // API returns in desc order (newest first), but we want to process chronologically
+        const chronologicalInsights = insights.reverse();
+
+        out.info(`Found ${chronologicalInsights.length} insights to process (reversed to oldest-first order)`);
 
         // Process each insight
         let processedCount = 0;
-        for (const insight of insights) {
+        for (const insight of chronologicalInsights) {
             try {
                 // Check if this insight has already been sent by comparing publishedAt dates
                 const cache_latestInsight = readCache({ filename: config.Cache.FILENAME });
@@ -152,7 +156,7 @@ async function processNewPublishedInsights({limit = 5}) {
                 if (cache_latestInsight && cache_latestInsight.publishedAt) {
                     const cachedDate = new Date(cache_latestInsight.publishedAt);
                     const insightDate = new Date(insight.publishedAt);
-                    
+
                     if (insightDate <= cachedDate) {
                         out.info(`Insight ${insight.id} (published: ${insight.publishedAt}) already processed (cached: ${cache_latestInsight.publishedAt}), skipping`);
                         continue;
@@ -183,7 +187,7 @@ async function processNewPublishedInsights({limit = 5}) {
                 processedCount++;
 
                 // Add delay only if there are more insights to process
-                if (processedCount < insights.length) {
+                if (processedCount < chronologicalInsights.length) {
                     out.info(`Waiting 1 second before processing next insight...`);
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
@@ -277,7 +281,7 @@ async function sendMessage({ insight }) {
         // Create the caption text with headline and link to the insight
         const caption = `${insight.headline}
 
-[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})`;
+[Read more](${config.Polaris.INSIGHTS_URL}${insight.id}) ${insight.readTime ? '_(' + insight.readTime + ')_' : ''}`;
 
         out.info(`Sending photo message to Telegram chat: ${config.Telegram.CHAT_ID}`);
         out.info(`Image URL: ${insight.backgroundValue}`);
