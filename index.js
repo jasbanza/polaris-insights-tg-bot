@@ -24,7 +24,7 @@ const out = new ConsoleLogColors();
 out.success(`Polaris Insights Telegram Bot initialized successfully`);
 
 // Load environment variables from .env file
-dotenv.config();
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 // Configuration object to centralize API URLs and settings
 const config = {
@@ -38,6 +38,9 @@ const config = {
     },
     Cache: {
         FILENAME: path.join(__dirname, 'latest_insight.cache.json')
+    },
+    Insights: {
+        LIMIT: parseInt(process.env.INSIGHTS_LIMIT, 10) || 5 // Default to 5 if not set
     }
 };
 
@@ -53,7 +56,7 @@ const config = {
         }
 
         // Process multiple new insights
-        await processNewPublishedInsights();
+        await processNewPublishedInsights({ limit: config.Insights.LIMIT });
 
         out.success(`Finished processing insights`);
 
@@ -119,10 +122,10 @@ function writeCache(data, { filename = 'cache.json' } = {}) {
  * Processes up to 5 latest insights, checking each against cache
  * @returns {Promise<void>}
  */
-async function processNewPublishedInsights() {
+async function processNewPublishedInsights({limit = 5}) {
     try {
-        const url = `${config.Polaris.API_URL}/ai/curated-insights?_sort=publishedAt&_order=desc&_limit=5`;
-        out.info(`Fetching latest 5 insights from: ${url}`);
+        const url = `${config.Polaris.API_URL}/ai/curated-insights?_sort=publishedAt&_order=desc&_end=${limit}`;
+        out.info(`Fetching latest ${limit} insights from: ${url}`);
 
         const response = await fetch(url);
 
