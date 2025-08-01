@@ -12,6 +12,12 @@ import fs from 'fs';
 import fetch from 'node-fetch';
 import { ConsoleLogColors } from "js-console-log-colors"; // custom context colors for console logging by jasbanza
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// Get current directory for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Initialize console log colors
 const out = new ConsoleLogColors();
@@ -31,7 +37,7 @@ const config = {
         CHAT_ID: process.env.TELEGRAM_CHAT_ID
     },
     Cache: {
-        FILENAME: 'cache_latest_insight.json'
+        FILENAME: path.join(__dirname, 'latest_insight.cache.json')
     }
 };
 
@@ -92,8 +98,20 @@ const config = {
  */
 function readCache({ filename = 'cache.json' }) {
     try {
+        // Debug: Log current working directory and file path
+        out.info(`Current working directory: ${process.cwd()}`);
+        out.info(`Attempting to read cache file: ${filename}`);
+        out.info(`File exists: ${fs.existsSync(filename)}`);
+        
+        if (!fs.existsSync(filename)) {
+            out.warn(`Cache file does not exist: ${filename}`);
+            return {};
+        }
+        
         const data = fs.readFileSync(filename, 'utf8');
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        out.info(`Cache loaded successfully from: ${filename}`);
+        return parsed;
     } catch (error) {
         out.warn(`Error reading cache (${filename}): ${error.message}`);
         return {};
@@ -108,8 +126,16 @@ function readCache({ filename = 'cache.json' }) {
  */
 function writeCache(data, { filename = 'cache.json' } = {}) {
     try {
+        out.info(`Writing cache to: ${filename}`);
         fs.writeFileSync(filename, JSON.stringify(data, null, 2));
-        out.info(`Cache updated: ${filename}`);
+        out.info(`Cache updated successfully: ${filename}`);
+        
+        // Verify the file was written
+        if (fs.existsSync(filename)) {
+            out.success(`Cache file verified: ${filename}`);
+        } else {
+            out.error(`Cache file was not created: ${filename}`);
+        }
     } catch (error) {
         out.error(`Error writing cache: ${error.message}`);
     }
