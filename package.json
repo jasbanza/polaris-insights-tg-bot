@@ -1,12 +1,13 @@
 {
   "name": "polaris-insights-tg-bot",
-  "version": "1.0.0",
-  "description": "Polaris insights tg bot",
+  "version": "2.0.0",
+  "description": "Telegram bot that fetches and sends Polaris insights with optional image overlay support",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
+    "lint": "echo \"Add ESLint here if needed\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
