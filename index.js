@@ -74,6 +74,8 @@ dotenv.config({ path: path.join(__dirname, '.env') });
  * Centralizes all configuration settings loaded from environment variables
  * @typedef {Object} Config
  */
+const isTestMode = process.env.TEST_MODE === 'true';
+
 const config = {
     /** Polaris API configuration */
     Polaris: {
@@ -87,16 +89,24 @@ const config = {
     Telegram: {
         /** @type {string} Telegram bot token */
         TOKEN: process.env.TELEGRAM_TOKEN,
-        /** @type {string} Telegram chat ID to send messages to */
+        /** @type {string} Production chat ID to send messages to */
         CHAT_ID: process.env.TELEGRAM_CHAT_ID,
+        /** @type {string} Test chat ID for testing mode */
+        TEST_CHAT_ID: process.env.TELEGRAM_TEST_CHAT_ID,
+        /** @type {boolean} Whether to run in test mode (uses TEST_CHAT_ID) */
+        TEST_MODE: isTestMode,
         /** @type {boolean} Whether to use image overlays (requires Sharp and Canvas) */
         USE_IMAGE_OVERLAY: process.env.USE_IMAGE_OVERLAY === 'true' && sharpAvailable && canvasAvailable
     },
     
     /** Caching configuration */
     Cache: {
-        /** @type {string} Path to cache file */
-        FILENAME: path.join(__dirname, 'latest_insight.cache.json')
+        /** @type {string} Path to timestamp cache file */
+        FILENAME: path.join(__dirname, isTestMode ? 'test_latest_insight.cache.json' : 'latest_insight.cache.json'),
+        /** @type {string} Path to processed IDs cache file */
+        PROCESSED_IDS_FILENAME: path.join(__dirname, isTestMode ? 'test_processed_insights.cache.json' : 'processed_insights.cache.json'),
+        /** @type {number} Maximum number of processed IDs to keep in cache */
+        MAX_PROCESSED_IDS: parseInt(process.env.MAX_PROCESSED_IDS) || 200
     },
     
     /** Insight processing configuration */
@@ -143,16 +153,35 @@ const config = {
 (async function main() {
     try {
         // Validate required environment variables
-        if (!config.Telegram.TOKEN || !config.Telegram.CHAT_ID) {
-            throw new Error('Missing required environment variables: TELEGRAM_TOKEN and/or TELEGRAM_CHAT_ID');
+        if (!config.Telegram.TOKEN) {
+            throw new Error('Missing required environment variable: TELEGRAM_TOKEN');
+        }
+
+        // Validate chat ID configuration based on mode
+        try {
+            const chatId = getChatId();
+            out.info(`Using chat ID: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST MODE' : 'PRODUCTION MODE'})`);
+        } catch (error) {
+            throw new Error(`Chat ID configuration error: ${error.message}`);
         }
 
         // Log current configuration for transparency
+        out.info(`Test mode enabled: ${config.Telegram.TEST_MODE}`);
+        if (config.Telegram.TEST_MODE) {
+            out.warn(`🧪 RUNNING IN TEST MODE - Messages will be sent to test chat: ${config.Telegram.TEST_CHAT_ID}`);
+        } else {
+            out.info(`📢 Running in production mode - Messages will be sent to: ${config.Telegram.CHAT_ID}`);
+        }
         out.info(`Sharp available: ${sharpAvailable}`);
         out.info(`Canvas available: ${canvasAvailable}`);
         out.info(`Image overlay enabled: ${config.Telegram.USE_IMAGE_OVERLAY}`);
         out.info(`Message type: ${config.Telegram.USE_IMAGE_OVERLAY ? 'Canvas-based image overlay' : 'Photo with caption (when available) or text only'}`);
         out.info(`Processing up to ${config.Insights.LIMIT} insights`);
+        out.info(`Duplicate protection: ID-based cache (max ${config.Cache.MAX_PROCESSED_IDS} entries) + timestamp optimization`);
+
+        // Log current cache status
+        const processedIds = readProcessedIds();
+        out.info(`Currently tracking ${processedIds.length} processed insight IDs`);
 
         // Process new insights from the API
         await processNewPublishedInsights({ limit: config.Insights.LIMIT });
@@ -232,6 +261,124 @@ function writeCache(data, { filename = 'cache.json' } = {}) {
 }
 
 /**
+ * Adds test mode prefix to messages when in test mode
+ * Helps distinguish test messages from production messages
+ * 
+ * @function addTestModePrefix
+ * @param {string} message - The original message text
+ * @returns {string} Message with test prefix if in test mode, otherwise unchanged
+ * @example
+ * const message = addTestModePrefix('Hello world');
+ */
+function addTestModePrefix(message) {
+    if (config.Telegram.TEST_MODE) {
+        return `🧪 [TEST] ${message}`;
+    }
+    return message;
+}
+
+/**
+ * Gets the appropriate chat ID based on test mode configuration
+ * Returns test chat ID when in test mode, otherwise returns production chat ID
+ * 
+ * @function getChatId
+ * @returns {string} The chat ID to use for sending messages
+ * @throws {Error} When required chat ID is not configured
+ * @example
+ * const chatId = getChatId();
+ */
+function getChatId() {
+    if (config.Telegram.TEST_MODE) {
+        if (!config.Telegram.TEST_CHAT_ID) {
+            throw new Error('TEST_MODE is enabled but TELEGRAM_TEST_CHAT_ID is not configured');
+        }
+        return config.Telegram.TEST_CHAT_ID;
+    } else {
+        if (!config.Telegram.CHAT_ID) {
+            throw new Error('TELEGRAM_CHAT_ID is not configured');
+        }
+        return config.Telegram.CHAT_ID;
+    }
+}
+
+/**
+ * Reads processed insight IDs from cache file
+ * Returns an array of previously processed insight IDs
+ * 
+ * @function readProcessedIds
+ * @returns {string[]} Array of processed insight IDs
+ * @example
+ * const processedIds = readProcessedIds();
+ */
+function readProcessedIds() {
+    try {
+        const data = readCache({ filename: config.Cache.PROCESSED_IDS_FILENAME });
+        return Array.isArray(data.processedIds) ? data.processedIds : [];
+    } catch (error) {
+        out.warn(`Error reading processed IDs cache: ${error.message}`);
+        return [];
+    }
+}
+
+/**
+ * Writes processed insight IDs to cache file
+ * Maintains a bounded list of processed IDs to prevent unlimited growth
+ * 
+ * @function writeProcessedIds
+ * @param {string[]} processedIds - Array of processed insight IDs
+ * @returns {void}
+ * @example
+ * writeProcessedIds(['id1', 'id2', 'id3']);
+ */
+function writeProcessedIds(processedIds) {
+    try {
+        // Keep only the most recent IDs to prevent unlimited cache growth
+        const boundedIds = processedIds.slice(-config.Cache.MAX_PROCESSED_IDS);
+        
+        writeCache({
+            processedIds: boundedIds,
+            lastUpdated: new Date().toISOString(),
+            totalCount: boundedIds.length
+        }, { filename: config.Cache.PROCESSED_IDS_FILENAME });
+        
+        out.info(`Processed IDs cache updated with ${boundedIds.length} entries`);
+    } catch (error) {
+        out.error(`Error writing processed IDs cache: ${error.message}`);
+    }
+}
+
+/**
+ * Checks if an insight ID has already been processed
+ * 
+ * @function isInsightProcessed
+ * @param {string} insightId - The insight ID to check
+ * @returns {boolean} True if the insight has been processed, false otherwise
+ * @example
+ * if (isInsightProcessed('123')) { console.log('Already processed'); }
+ */
+function isInsightProcessed(insightId) {
+    const processedIds = readProcessedIds();
+    return processedIds.includes(insightId);
+}
+
+/**
+ * Adds an insight ID to the processed cache
+ * 
+ * @function addProcessedInsight
+ * @param {string} insightId - The insight ID to add to processed cache
+ * @returns {void}
+ * @example
+ * addProcessedInsight('123');
+ */
+function addProcessedInsight(insightId) {
+    const processedIds = readProcessedIds();
+    if (!processedIds.includes(insightId)) {
+        processedIds.push(insightId);
+        writeProcessedIds(processedIds);
+    }
+}
+
+/**
  * Fetches new published insights and sends them to Telegram
  * Processes insights chronologically and uses caching to prevent duplicates
  * 
@@ -272,16 +419,22 @@ async function processNewPublishedInsights({ limit = 5 }) {
         let processedCount = 0;
         for (const insight of chronologicalInsights) {
             try {
-                // Check cache to avoid processing duplicates
-                const cacheData = readCache({ filename: config.Cache.FILENAME });
+                // Primary check: Has this specific insight ID been processed before?
+                if (isInsightProcessed(insight.id)) {
+                    out.info(`Insight ${insight.id} already processed (found in processed IDs cache), skipping`);
+                    continue;
+                }
 
+                // Secondary check: Use timestamp cache for efficiency (skip older insights)
+                const cacheData = readCache({ filename: config.Cache.FILENAME });
                 if (cacheData && cacheData.publishedAt) {
                     const cachedDate = new Date(cacheData.publishedAt);
                     const insightDate = new Date(insight.publishedAt);
 
-                    // Skip if this insight was already processed
-                    if (insightDate <= cachedDate) {
-                        out.info(`Insight ${insight.id} (published: ${insight.publishedAt}) already processed (cached: ${cacheData.publishedAt}), skipping`);
+                    // Skip if this insight is older than our last processed timestamp
+                    // This is an optimization - the ID check above is the primary protection
+                    if (insightDate < cachedDate) {
+                        out.info(`Insight ${insight.id} (published: ${insight.publishedAt}) is older than cached timestamp (${cacheData.publishedAt}), skipping`);
                         continue;
                     }
                 }
@@ -298,7 +451,11 @@ async function processNewPublishedInsights({ limit = 5 }) {
 
                 out.success(`Message sent successfully for insight ${insight.id}`);
 
-                // Update cache only after successful send
+                // Update both caches only after successful send
+                // 1. Add to processed IDs cache (primary protection)
+                addProcessedInsight(insight.id);
+                
+                // 2. Update timestamp cache (secondary optimization)
                 writeCache({
                     id: insight.id,
                     publishedAt: insight.publishedAt,
@@ -527,14 +684,15 @@ async function sendMessage({ insight }) {
         const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendPhoto`;
 
         // Create simple caption since text is rendered on the image
-        const caption = `**[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})**`;
+        const caption = addTestModePrefix(`**[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})**`);
 
-        out.info(`Sending photo with text overlay to Telegram chat: ${config.Telegram.CHAT_ID}`);
+        const chatId = getChatId();
+        out.info(`Sending photo with text overlay to Telegram chat: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST' : 'PROD'})`);
 
         // Prepare form data for file upload
         const FormData = (await import('form-data')).default;
         const form = new FormData();
-        form.append('chat_id', config.Telegram.CHAT_ID);
+        form.append('chat_id', chatId);
         form.append('photo', imageBuffer, 'insight-image.jpg');
         form.append('caption', caption);
         form.append('parse_mode', 'markdown');
@@ -594,17 +752,18 @@ async function sendTextMessage({ insight }) {
         const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendMessage`;
 
         // Create formatted message with headline and read more link
-        const messageText = `${insight.headline}
+        const messageText = addTestModePrefix(`${insight.headline}
 
-[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})`;
+[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})`);
 
-        out.info(`Sending text message to Telegram chat: ${config.Telegram.CHAT_ID}`);
+        const chatId = getChatId();
+        out.info(`Sending text message to Telegram chat: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST' : 'PROD'})`);
 
         const response = await fetch(telegramApiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                chat_id: config.Telegram.CHAT_ID,
+                chat_id: chatId,
                 text: messageText,
                 parse_mode: 'markdown',
                 disable_web_page_preview: false
@@ -652,18 +811,19 @@ async function sendPhotoMessage({ insight }) {
         const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendPhoto`;
 
         // Create caption with headline and read more link
-        const caption = `${insight.headline}
+        const caption = addTestModePrefix(`${insight.headline}
 
-[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})`;
+[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})`);
 
-        out.info(`Sending photo message to Telegram chat: ${config.Telegram.CHAT_ID}`);
+        const chatId = getChatId();
+        out.info(`Sending photo message to Telegram chat: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST' : 'PROD'})`);
 
         // Send photo using the direct URL (let Telegram handle the download)
         const response = await fetch(telegramApiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                chat_id: config.Telegram.CHAT_ID,
+                chat_id: chatId,
                 photo: insight.backgroundValue,
                 caption: caption,
                 parse_mode: 'markdown'
