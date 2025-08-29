@@ -2,7 +2,7 @@
  * Polaris Insights Telegram Bot
  * 
  * This bot fetches the latest published insights from Polaris API and sends them to a Telegram chat.
- * It supports both simple text messages and rich image overlays with custom typography.
+ * It sends simple text messages and photo messages with captions.
  * Uses intelligent caching to avoid sending duplicate insights.
  * 
  * Features:
@@ -10,7 +10,6 @@
  * - Processes multiple insights chronologically 
  * - Sends to Telegram with proper formatting
  * - Caches processed insights to prevent duplicates
- * - Optional image overlay with custom fonts (currently disabled)
  * 
  * @author jasbanza
  * @version 2.0.0
@@ -30,37 +29,20 @@ const __dirname = path.dirname(__filename);
 // Initialize console logger with color support
 const out = new ConsoleLogColors();
 
-// Initialize Sharp and Canvas modules for image processing (optional feature)
-// These are loaded dynamically to gracefully handle missing dependencies
-let sharp = null;
-let sharpAvailable = false;
+// Initialize Canvas module for image processing
 let Canvas = null;
 let canvasAvailable = false;
 
-// Attempt to load Sharp module for image processing
-try {
-    const sharpModule = await import('sharp');
-    sharp = sharpModule.default;
-    
-    if (sharp) {
-        sharp.cache(false); // Disable cache to prevent font-related issues
-        sharpAvailable = true;
-        out.success('Sharp loaded successfully - image processing available');
-    }
-} catch (error) {
-    out.warn(`Sharp not available (${error.message}) - image overlay disabled, text messages only`);
-    sharpAvailable = false;
-}
-
-// Attempt to load Canvas module for text rendering
+// Attempt to load Canvas module for image processing
 try {
     Canvas = await import('canvas');
+    
     if (Canvas) {
         canvasAvailable = true;
-        out.success('Canvas loaded successfully - custom font rendering available');
+        out.success('Canvas loaded successfully - image processing available');
     }
 } catch (error) {
-    out.warn(`Canvas not available (${error.message}) - falling back to system fonts only`);
+    out.warn(`Canvas not available (${error.message}) - color background processing disabled`);
     canvasAvailable = false;
 }
 
@@ -95,8 +77,8 @@ const config = {
         TEST_CHAT_ID: process.env.TELEGRAM_TEST_CHAT_ID,
         /** @type {boolean} Whether to run in test mode (uses TEST_CHAT_ID) */
         TEST_MODE: isTestMode,
-        /** @type {boolean} Whether to use image overlays (requires Sharp and Canvas) */
-        USE_IMAGE_OVERLAY: process.env.USE_IMAGE_OVERLAY === 'true' && sharpAvailable && canvasAvailable
+        /** @type {boolean} Whether to disable web page previews in messages */
+        DISABLE_WEB_PAGE_PREVIEW: process.env.DISABLE_WEB_PAGE_PREVIEW === 'true'
     },
     
     /** Caching configuration */
@@ -112,33 +94,9 @@ const config = {
     /** Insight processing configuration */
     Insights: {
         /** @type {number} Maximum number of insights to process per run */
-        LIMIT: parseInt(process.env.INSIGHTS_LIMIT) || 5
-    },
-    
-    /** Image overlay configuration (used when USE_IMAGE_OVERLAY is true) */
-    ImageOverlay: {
-        /** @type {number} Text width as percentage of image width (0.1-1.0) */
-        TEXT_WIDTH_PERCENT: parseFloat(process.env.TEXT_WIDTH_PERCENT) || 0.8,
-        /** @type {number} Image width divided by this number for font size */
-        FONT_SIZE_DIVISOR: parseInt(process.env.FONT_SIZE_DIVISOR) || 20,
-        /** @type {number} Pixels from bottom edge (deprecated - now using center alignment) */
-        BOTTOM_MARGIN: parseInt(process.env.BOTTOM_MARGIN) || 60,
-        /** @type {number} Line spacing multiplier */
-        LINE_HEIGHT_MULTIPLIER: parseFloat(process.env.LINE_HEIGHT_MULTIPLIER) || 1.2,
-        /** @type {string} Text color */
-        TEXT_COLOR: process.env.TEXT_COLOR || 'white',
-        /** @type {string} Text outline color */
-        TEXT_STROKE_COLOR: process.env.TEXT_STROKE_COLOR || 'black',
-        /** @type {number} Text outline thickness */
-        TEXT_STROKE_WIDTH: parseInt(process.env.TEXT_STROKE_WIDTH) || 2,
-        /** @type {number} Read time font size as percentage of main font (0.5-1.0) */
-        READTIME_FONT_SIZE_PERCENT: parseFloat(process.env.READTIME_FONT_SIZE_PERCENT) || 0.7,
-        /** @type {number} Pixels below main text for read time */
-        READTIME_MARGIN_TOP: parseInt(process.env.READTIME_MARGIN_TOP) || 20,
-        /** @type {string} Font family for text rendering */
-        FONT_FAMILY: process.env.FONT_FAMILY || '"PP Editorial New Ultralight",Arial, serif',
-        /** @type {number} JPEG quality 1-100 */
-        IMAGE_QUALITY: parseInt(process.env.IMAGE_QUALITY) || 90
+        LIMIT: parseInt(process.env.INSIGHTS_LIMIT) || 7,
+        /** @type {number} Minimum age in minutes before processing insights (prevents premature posting during editing) */
+        MINIMUM_AGE_MINUTES: parseInt(process.env.MINIMUM_AGE_MINUTES) || 10
     }
 };
 
@@ -172,16 +130,13 @@ const config = {
         } else {
             out.info(`📢 Running in production mode - Messages will be sent to: ${config.Telegram.CHAT_ID}`);
         }
-        out.info(`Sharp available: ${sharpAvailable}`);
-        out.info(`Canvas available: ${canvasAvailable}`);
-        out.info(`Image overlay enabled: ${config.Telegram.USE_IMAGE_OVERLAY}`);
-        out.info(`Message type: ${config.Telegram.USE_IMAGE_OVERLAY ? 'Canvas-based image overlay' : 'Photo with caption (when available) or text only'}`);
         out.info(`Processing up to ${config.Insights.LIMIT} insights`);
+        out.info(`Minimum insight age: ${config.Insights.MINIMUM_AGE_MINUTES} minutes (prevents posting during editing)`);
         out.info(`Duplicate protection: ID-based cache (max ${config.Cache.MAX_PROCESSED_IDS} entries) + timestamp optimization`);
 
         // Log current cache status
-        const processedIds = readProcessedIds();
-        out.info(`Currently tracking ${processedIds.length} processed insight IDs`);
+        const processedInsights = readProcessedIds();
+        out.info(`Currently tracking ${processedInsights.length} processed insight IDs`);
 
         // Process new insights from the API
         await processNewPublishedInsights({ limit: config.Insights.LIMIT });
@@ -357,24 +312,40 @@ function writeProcessedIds(processedIds) {
  * if (isInsightProcessed('123')) { console.log('Already processed'); }
  */
 function isInsightProcessed(insightId) {
-    const processedIds = readProcessedIds();
-    return processedIds.includes(insightId);
+    const processedInsights = readProcessedIds();
+    return processedInsights.some(item => 
+        typeof item === 'string' ? item === insightId : item.id === insightId
+    );
 }
 
 /**
- * Adds an insight ID to the processed cache
+ * Adds an insight to the processed cache with metadata
  * 
  * @function addProcessedInsight
  * @param {string} insightId - The insight ID to add to processed cache
+ * @param {Object} [metadata] - Optional metadata about the insight
+ * @param {string} [metadata.backgroundType] - Type of background ('color' or 'image')
+ * @param {string} [metadata.backgroundValue] - Background color name or image URL
+ * @param {string} [metadata.processedAt] - When the insight was processed
  * @returns {void}
  * @example
- * addProcessedInsight('123');
+ * addProcessedInsight('123', { backgroundType: 'color', backgroundValue: 'red-100' });
  */
-function addProcessedInsight(insightId) {
-    const processedIds = readProcessedIds();
-    if (!processedIds.includes(insightId)) {
-        processedIds.push(insightId);
-        writeProcessedIds(processedIds);
+function addProcessedInsight(insightId, metadata = {}) {
+    const processedInsights = readProcessedIds();
+    const existingIndex = processedInsights.findIndex(item => 
+        typeof item === 'string' ? item === insightId : item.id === insightId
+    );
+    
+    if (existingIndex === -1) {
+        // Add new insight with metadata
+        const insightData = {
+            id: insightId,
+            processedAt: new Date().toISOString(),
+            ...metadata
+        };
+        processedInsights.push(insightData);
+        writeProcessedIds(processedInsights);
     }
 }
 
@@ -415,9 +386,28 @@ async function processNewPublishedInsights({ limit = 5 }) {
         const chronologicalInsights = insights.reverse();
         out.info(`Found ${chronologicalInsights.length} insights to process (reversed to oldest-first order)`);
 
+        // Filter out insights that are too recent (within minimum age threshold)
+        const now = new Date();
+        const minAgeMs = config.Insights.MINIMUM_AGE_MINUTES * 60 * 1000; // Convert minutes to milliseconds
+        
+        const eligibleInsights = chronologicalInsights.filter(insight => {
+            const publishedAt = new Date(insight.publishedAt);
+            const ageMs = now.getTime() - publishedAt.getTime();
+            const isOldEnough = ageMs >= minAgeMs;
+            
+            if (!isOldEnough) {
+                const ageMinutes = Math.floor(ageMs / (60 * 1000));
+                out.info(`Insight ${insight.id} is too recent (${ageMinutes} minutes old, minimum ${config.Insights.MINIMUM_AGE_MINUTES} minutes), skipping`);
+            }
+            
+            return isOldEnough;
+        });
+        
+        out.info(`${eligibleInsights.length} of ${chronologicalInsights.length} insights are old enough to process`);
+
         // Process each insight with error handling
         let processedCount = 0;
-        for (const insight of chronologicalInsights) {
+        for (const insight of eligibleInsights) {
             try {
                 // Primary check: Has this specific insight ID been processed before?
                 if (isInsightProcessed(insight.id)) {
@@ -451,9 +441,16 @@ async function processNewPublishedInsights({ limit = 5 }) {
 
                 out.success(`Message sent successfully for insight ${insight.id}`);
 
+                // Extract background information for cache metadata
+                const backgroundMetadata = {};
+                if (insight.backgroundType && insight.backgroundValue) {
+                    backgroundMetadata.backgroundType = insight.backgroundType;
+                    backgroundMetadata.backgroundValue = insight.backgroundValue;
+                }
+
                 // Update both caches only after successful send
-                // 1. Add to processed IDs cache (primary protection)
-                addProcessedInsight(insight.id);
+                // 1. Add to processed IDs cache (primary protection) with metadata
+                addProcessedInsight(insight.id, backgroundMetadata);
                 
                 // 2. Update timestamp cache (secondary optimization)
                 writeCache({
@@ -465,7 +462,7 @@ async function processNewPublishedInsights({ limit = 5 }) {
                 processedCount++;
 
                 // Rate limiting: add delay between messages (except for last one)
-                const hasMoreInsights = processedCount < chronologicalInsights.length;
+                const hasMoreInsights = processedCount < eligibleInsights.length;
                 if (hasMoreInsights) {
                     out.info('Waiting 1 second before processing next insight...');
                     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -485,150 +482,191 @@ async function processNewPublishedInsights({ limit = 5 }) {
 }
 
 /**
- * Creates an image with text overlay using Canvas and Sharp
- * This function is preserved for future use but currently disabled via configuration
- * 
- * @async
- * @function createImageWithTextOverlay
- * @param {Object} options - Image creation options
- * @param {string} options.backgroundImageUrl - URL of the background image to download
- * @param {string} options.headline - Text to overlay on the image
- * @param {string} [options.readTime] - Optional read time text to display below headline
- * @returns {Promise<Buffer>} Processed image buffer ready for upload
- * @throws {Error} When Sharp/Canvas unavailable or image processing fails
- * @example
- * const imageBuffer = await createImageWithTextOverlay({
- *   backgroundImageUrl: 'https://example.com/image.jpg',
- *   headline: 'Breaking News Story',
- *   readTime: '5 min read'
- * });
+ * Loads color definitions from colors.json file
+ * @returns {Object} Color definitions object
  */
-async function createImageWithTextOverlay({ backgroundImageUrl, headline, readTime }) {
+function loadColors() {
     try {
-        // Validate dependencies
-        if (!sharpAvailable) {
-            throw new Error('Sharp module not available - cannot create image overlay');
-        }
-        
+        const colorsPath = path.join(__dirname, 'colors.json');
+        const colorsData = fs.readFileSync(colorsPath, 'utf8');
+        return JSON.parse(colorsData);
+    } catch (error) {
+        out.error(`Error loading colors.json: ${error.message}`);
+        return {};
+    }
+}
+
+/**
+ * Converts RGB string to array
+ * @param {string} rgbString - RGB string like "50 82 70"
+ * @returns {number[]} RGB array like [50, 82, 70]
+ */
+function parseRgbString(rgbString) {
+    return rgbString.split(' ').map(num => parseInt(num, 10));
+}
+
+/**
+ * Creates an image with a colored background and overlays a PNG using Canvas
+ * @async
+ * @function createColoredBackgroundImage
+ * @param {Object} options - Image creation options
+ * @param {string} options.colorName - Color name to lookup in colors.json
+ * @param {string} options.overlayImageUrl - URL of the PNG image to overlay
+ * @param {number} [options.width=1920] - Image width (matches background images)
+ * @param {number} [options.height=960] - Image height (matches background images)
+ * @returns {Promise<Buffer>} Processed image buffer
+ */
+async function createColoredBackgroundImage({ colorName, overlayImageUrl, width = 1920, height = 960 }) {
+    try {
         if (!canvasAvailable) {
-            throw new Error('Canvas module not available - cannot create text overlay');
+            throw new Error('Canvas module not available - cannot create colored background');
+        }
+
+        out.info(`Creating colored background image with color: ${colorName}`);
+        
+        // Load colors and get RGB values
+        const colors = loadColors();
+        const rgbString = colors[colorName];
+        
+        if (!rgbString) {
+            throw new Error(`Color "${colorName}" not found in colors.json`);
         }
         
-        out.info(`Creating image with Canvas text overlay for: ${headline}`);
+        const [r, g, b] = parseRgbString(rgbString);
+        out.info(`Using RGB color: ${r}, ${g}, ${b} for ${colorName}`);
         
-        // Download the background image
-        const imageResponse = await fetch(backgroundImageUrl);
-        if (!imageResponse.ok) {
-            throw new Error(`Failed to fetch background image: ${imageResponse.status}`);
+        // Download the overlay PNG image
+        const overlayResponse = await fetch(overlayImageUrl);
+        if (!overlayResponse.ok) {
+            throw new Error(`Failed to fetch overlay image: ${overlayResponse.status}`);
         }
         
-        const imageBuffer = await imageResponse.buffer();
+        const overlayBuffer = await overlayResponse.buffer();
         
-        // Get image metadata for canvas sizing
-        const image = sharp(imageBuffer);
-        const metadata = await image.metadata();
-        const { width, height } = metadata;
-        
-        // Create Canvas with same dimensions as background image
+        // Create Canvas with specified dimensions
         const canvas = Canvas.createCanvas(width, height);
         const ctx = canvas.getContext('2d');
         
-        // Configure font from environment settings
-        const fontFamily = config.ImageOverlay.FONT_FAMILY;
-        out.info(`Using system-installed fonts: ${fontFamily}`);
+        // Fill background with the specified color
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        ctx.fillRect(0, 0, width, height);
         
-        // Calculate responsive text layout based on image dimensions
-        const maxTextWidth = Math.floor(width * config.ImageOverlay.TEXT_WIDTH_PERCENT);
-        const fontSize = Math.floor(width / config.ImageOverlay.FONT_SIZE_DIVISOR);
-        const lineHeight = fontSize * config.ImageOverlay.LINE_HEIGHT_MULTIPLIER;
+        // Load the overlay image
+        const overlayImage = await Canvas.loadImage(overlayBuffer);
         
-        // Configure Canvas text properties with custom styling
-        ctx.font = `200 ${fontSize}px "${fontFamily.split(',')[0].replace(/"/g, '')}", serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.letterSpacing = '-0.0025em'; // Custom letter spacing for typography
+        // Calculate scaling to fit image within canvas while maintaining aspect ratio
+        const scaleX = width / overlayImage.width;
+        const scaleY = height / overlayImage.height;
+        const scale = Math.min(scaleX, scaleY) * 0.53; // Use 53% of available space (2/3rds of previous 80%)
         
-        // Test font rendering for debugging
-        const testMetrics = ctx.measureText('Test');
-        out.info(`Font test - width: ${testMetrics.width}px, font: ${ctx.font}, letterSpacing: ${ctx.letterSpacing}`);
+        const scaledWidth = overlayImage.width * scale;
+        const scaledHeight = overlayImage.height * scale;
         
-        // Intelligent text wrapping based on actual text measurements
-        const words = headline.split(' ');
-        const lines = [];
-        let currentLine = '';
+        // Calculate position to center the overlay
+        const x = (width - scaledWidth) / 2;
+        const y = (height - scaledHeight) / 2;
         
-        for (const word of words) {
-            const testLine = currentLine ? `${currentLine} ${word}` : word;
-            const metrics = ctx.measureText(testLine);
-            
-            // Break line if text exceeds maximum width
-            if (metrics.width > maxTextWidth && currentLine) {
-                lines.push(currentLine);
-                currentLine = word;
-            } else {
-                currentLine = testLine;
-            }
-        }
-        if (currentLine) lines.push(currentLine);
+        out.info(`Scaling overlay from ${overlayImage.width}x${overlayImage.height} to ${Math.floor(scaledWidth)}x${Math.floor(scaledHeight)}`);
         
-        // Calculate vertical positioning for center alignment
-        const totalTextHeight = lines.length * lineHeight;
-        const readTimeFontSize = readTime ? Math.floor(fontSize * config.ImageOverlay.READTIME_FONT_SIZE_PERCENT) : 0;
-        const readTimeHeight = readTime ? readTimeFontSize + config.ImageOverlay.READTIME_MARGIN_TOP : 0;
-        const totalContentHeight = totalTextHeight + readTimeHeight;
+        // Draw the overlay image centered on the canvas
+        ctx.drawImage(overlayImage, x, y, scaledWidth, scaledHeight);
         
-        // Center the entire text block (main text + read time) vertically
-        const centerY = height / 2;
-        const startY = centerY - (totalContentHeight / 2);
+        // Convert canvas to JPEG buffer
+        const imageBuffer = canvas.toBuffer('image/jpeg', { quality: 0.9 });
         
-        // Render main text with stroke effect for readability
-        ctx.strokeStyle = config.ImageOverlay.TEXT_STROKE_COLOR;
-        ctx.lineWidth = config.ImageOverlay.TEXT_STROKE_WIDTH;
-        ctx.fillStyle = config.ImageOverlay.TEXT_COLOR;
-        
-        lines.forEach((line, index) => {
-            const y = startY + (index * lineHeight);
-            ctx.strokeText(line, width / 2, y); // Text outline
-            ctx.fillText(line, width / 2, y);   // Text fill
-        });
-        
-        // Render read time if available
-        if (readTime) {
-            const readTimeY = startY + totalTextHeight + config.ImageOverlay.READTIME_MARGIN_TOP;
-            
-            // Use smaller font for read time
-            ctx.font = `200 ${readTimeFontSize}px "${fontFamily.split(',')[0].replace(/"/g, '')}", serif`;
-            ctx.strokeStyle = config.ImageOverlay.TEXT_STROKE_COLOR;
-            ctx.lineWidth = 1; // Thinner stroke for read time
-            ctx.fillStyle = config.ImageOverlay.TEXT_COLOR;
-            
-            const readTimeText = `(${readTime})`;
-            ctx.strokeText(readTimeText, width / 2, readTimeY);
-            ctx.fillText(readTimeText, width / 2, readTimeY);
-        }
-        
-        // Convert Canvas to PNG buffer for compositing
-        const canvasBuffer = canvas.toBuffer('image/png');
-        
-        // Composite text overlay onto background image using Sharp
-        const finalImage = await image
-            .composite([{ input: canvasBuffer, top: 0, left: 0 }])
-            .jpeg({ quality: config.ImageOverlay.IMAGE_QUALITY })
-            .toBuffer();
-        
-        out.success('Image with Canvas text overlay created successfully');
-        return finalImage;
+        out.success(`Created colored background image with ${colorName} background and centered overlay`);
+        return imageBuffer;
         
     } catch (error) {
-        out.error(`Error creating image with Canvas text overlay: ${error.message}`);
+        out.error(`Error creating colored background image: ${error.message}`);
         throw error;
     }
 }
 
 /**
+ * Determines the appropriate image URL or creates a custom image based on background type
+ * @async
+ * @function getImageForInsight
+ * @param {Object} insight - The insight object
+ * @returns {Promise<string|Buffer>} Either a URL string or a Buffer for custom images
+ */
+async function getImageForInsight(insight) {
+    try {
+        const { backgroundType, backgroundValue, visualizationType, visualizationValue } = insight;
+        
+        // Helper function to check if a string is a valid URL
+        const isValidUrl = (string) => {
+            try {
+                new URL(string);
+                return true;
+            } catch (_) {
+                return false;
+            }
+        };
+        
+        if (backgroundType === 'image') {
+            // Use backgroundValue URL directly for image backgrounds
+            // But if visualizationType is 'graphics', prefer the visualizationValue
+            if (visualizationType === 'graphics' && visualizationValue) {
+                // Check if visualizationValue is a valid URL
+                if (isValidUrl(visualizationValue)) {
+                    out.info(`Using graphics visualization: ${visualizationValue}`);
+                    return visualizationValue;
+                } else {
+                    out.warn(`Graphics visualization value "${visualizationValue}" is not a valid URL, falling back to backgroundValue`);
+                    if (backgroundValue && isValidUrl(backgroundValue)) {
+                        out.info(`Using image background: ${backgroundValue}`);
+                        return backgroundValue;
+                    } else {
+                        out.warn(`Background value "${backgroundValue}" is also not a valid URL`);
+                        return null;
+                    }
+                }
+            } else {
+                if (backgroundValue && isValidUrl(backgroundValue)) {
+                    out.info(`Using image background: ${backgroundValue}`);
+                    return backgroundValue;
+                } else {
+                    out.warn(`Background value "${backgroundValue}" is not a valid URL`);
+                    return null;
+                }
+            }
+        } else if (backgroundType === 'color') {
+            // Create custom image with colored background and PNG overlay
+            if (!visualizationValue) {
+                throw new Error('No visualizationValue provided for color background');
+            }
+            
+            // Check if visualizationValue is a valid URL
+            if (!isValidUrl(visualizationValue)) {
+                throw new Error(`Visualization value "${visualizationValue}" is not a valid URL for color background overlay`);
+            }
+            
+            out.info(`Creating colored background image with ${backgroundValue} and overlay ${visualizationValue}`);
+            const imageBuffer = await createColoredBackgroundImage({
+                colorName: backgroundValue,
+                overlayImageUrl: visualizationValue
+            });
+            
+            return imageBuffer;
+        } else {
+            // Fallback to backgroundValue if available and is a valid URL
+            if (backgroundValue && isValidUrl(backgroundValue)) {
+                return backgroundValue;
+            } else {
+                out.warn(`Fallback background value "${backgroundValue}" is not a valid URL`);
+                return null;
+            }
+        }
+    } catch (error) {
+        out.error(`Error getting image for insight: ${error.message}`);
+        return null;
+    }
+}
+
+/**
  * Sends a message with insight data to Telegram chat
- * Automatically chooses between text message and image overlay based on configuration
- * Provides graceful fallback from image overlay to text message on errors
+ * Sends either a text message or photo message with caption based on available data
  * 
  * @async
  * @function sendMessage
@@ -636,10 +674,10 @@ async function createImageWithTextOverlay({ backgroundImageUrl, headline, readTi
  * @param {Object} options.insight - The insight object containing message data
  * @param {string} options.insight.headline - The insight headline text
  * @param {string} options.insight.id - The unique insight identifier
- * @param {string} [options.insight.backgroundValue] - Optional background image URL for overlay
+ * @param {string} [options.insight.backgroundValue] - Optional background image URL
  * @param {string} [options.insight.readTime] - Optional read time text
  * @returns {Promise<Object>} Telegram API response object
- * @throws {Error} When both image overlay and text message fail
+ * @throws {Error} When both photo and text message fail
  * @example
  * const response = await sendMessage({ 
  *   insight: { 
@@ -652,68 +690,25 @@ async function createImageWithTextOverlay({ backgroundImageUrl, headline, readTi
  */
 async function sendMessage({ insight }) {
     try {
-        // Check if image overlay is enabled and dependencies are available
-        if (!config.Telegram.USE_IMAGE_OVERLAY || !sharpAvailable || !canvasAvailable) {
-            // Log reason for using simple message format
-            if (!sharpAvailable) {
-                out.warn(`Sharp not available, sending photo/text message for insight ${insight.id}`);
-            } else if (!canvasAvailable) {
-                out.warn(`Canvas not available, sending photo/text message for insight ${insight.id}`);
-            } else {
-                out.info(`Image overlay disabled, sending photo/text message for insight ${insight.id}`);
+        // Get the appropriate image (URL or Buffer) based on background type
+        const imageData = await getImageForInsight(insight);
+        
+        if (imageData) {
+            if (typeof imageData === 'string') {
+                // It's a URL, send as photo message with URL
+                out.info(`Sending photo message with URL for insight ${insight.id}`);
+                return await sendPhotoMessage({ insight, imageUrl: imageData });
+            } else if (Buffer.isBuffer(imageData)) {
+                // It's a Buffer, send as photo message with buffer
+                out.info(`Sending photo message with custom image buffer for insight ${insight.id}`);
+                return await sendPhotoMessageWithBuffer({ insight, imageBuffer: imageData });
             }
-            return await sendTextMessage({ insight });
         }
-
-        // Check if we have a background image for overlay
-        if (!insight.backgroundValue) {
-            out.warn(`No image URL found for insight ${insight.id}, sending text message instead`);
-            return await sendTextMessage({ insight });
-        }
-
-        out.info(`Creating image overlay for insight ${insight.id}`);
-
-        // Attempt to create image with text overlay
-        const imageBuffer = await createImageWithTextOverlay({
-            backgroundImageUrl: insight.backgroundValue,
-            headline: insight.headline,
-            readTime: insight.readTime
-        });
-
-        // Send the processed image via Telegram
-        const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendPhoto`;
-
-        // Create simple caption since text is rendered on the image
-        const caption = addTestModePrefix(`**[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})**`);
-
-        const chatId = getChatId();
-        out.info(`Sending photo with text overlay to Telegram chat: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST' : 'PROD'})`);
-
-        // Prepare form data for file upload
-        const FormData = (await import('form-data')).default;
-        const form = new FormData();
-        form.append('chat_id', chatId);
-        form.append('photo', imageBuffer, 'insight-image.jpg');
-        form.append('caption', caption);
-        form.append('parse_mode', 'markdown');
-
-        const response = await fetch(telegramApiUrl, {
-            method: 'POST',
-            body: form
-        });
-
-        if (!response.ok) {
-            throw new Error(`Telegram API error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (!data.ok) {
-            throw new Error(`Telegram API returned error: ${data.description || 'Unknown error'}`);
-        }
-
-        return data;
-
+        
+        // Fallback to text message if no image data
+        out.info(`No image data found for insight ${insight.id}, sending text message`);
+        return await sendTextMessage({ insight });
+        
     } catch (error) {
         out.error(`Error sending message: ${error.message}`);
         // Graceful fallback to text message if image processing fails
@@ -724,8 +719,7 @@ async function sendMessage({ insight }) {
 
 /**
  * Sends a text message to Telegram chat
- * Used as the primary message format when image overlay is disabled
- * If a background image is available, sends it as a photo with the headline as caption
+ * Used when no background image is available
  * 
  * @async
  * @function sendTextMessage
@@ -733,22 +727,15 @@ async function sendMessage({ insight }) {
  * @param {Object} options.insight - The insight object containing headline and id
  * @param {string} options.insight.headline - The insight headline text
  * @param {string} options.insight.id - The unique insight identifier
- * @param {string} [options.insight.backgroundValue] - Optional background image URL
  * @returns {Promise<Object>} Telegram API response object
  * @throws {Error} When Telegram API request fails
  * @example
  * const response = await sendTextMessage({ 
- *   insight: { headline: 'Breaking News', id: '123', backgroundValue: 'https://example.com/image.jpg' } 
+ *   insight: { headline: 'Breaking News', id: '123' } 
  * });
  */
 async function sendTextMessage({ insight }) {
     try {
-        // If there's a background image, send it as a photo with caption
-        if (insight.backgroundValue) {
-            return await sendPhotoMessage({ insight });
-        }
-
-        // Otherwise send as plain text message
         const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendMessage`;
 
         // Create formatted message with headline and read more link
@@ -766,17 +753,20 @@ async function sendTextMessage({ insight }) {
                 chat_id: chatId,
                 text: messageText,
                 parse_mode: 'markdown',
-                disable_web_page_preview: false
+                disable_web_page_preview: config.Telegram.DISABLE_WEB_PAGE_PREVIEW
             })
         });
 
         if (!response.ok) {
-            throw new Error(`Telegram API error! status: ${response.status}`);
+            const errorText = await response.text();
+            out.error(`Telegram API HTTP error! Status: ${response.status}, Response: ${errorText}`);
+            throw new Error(`Telegram API error! status: ${response.status}, response: ${errorText}`);
         }
 
         const data = await response.json();
 
         if (!data.ok) {
+            out.error(`Telegram API returned error: ${JSON.stringify(data, null, 2)}`);
             throw new Error(`Telegram API returned error: ${data.description || 'Unknown error'}`);
         }
 
@@ -798,15 +788,16 @@ async function sendTextMessage({ insight }) {
  * @param {Object} options.insight - The insight object containing message data
  * @param {string} options.insight.headline - The insight headline text
  * @param {string} options.insight.id - The unique insight identifier
- * @param {string} options.insight.backgroundValue - Background image URL
+ * @param {string} [options.imageUrl] - Optional image URL (uses insight.backgroundValue if not provided)
  * @returns {Promise<Object>} Telegram API response object
  * @throws {Error} When Telegram API request fails or image download fails
  * @example
  * const response = await sendPhotoMessage({ 
- *   insight: { headline: 'Breaking News', id: '123', backgroundValue: 'https://example.com/image.jpg' } 
+ *   insight: { headline: 'Breaking News', id: '123' },
+ *   imageUrl: 'https://example.com/image.jpg'
  * });
  */
-async function sendPhotoMessage({ insight }) {
+async function sendPhotoMessage({ insight, imageUrl }) {
     try {
         const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendPhoto`;
 
@@ -818,25 +809,31 @@ async function sendPhotoMessage({ insight }) {
         const chatId = getChatId();
         out.info(`Sending photo message to Telegram chat: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST' : 'PROD'})`);
 
+        // Use provided imageUrl or fall back to insight.backgroundValue
+        const photoUrl = imageUrl || insight.backgroundValue;
+
         // Send photo using the direct URL (let Telegram handle the download)
         const response = await fetch(telegramApiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 chat_id: chatId,
-                photo: insight.backgroundValue,
+                photo: photoUrl,
                 caption: caption,
                 parse_mode: 'markdown'
             })
         });
 
         if (!response.ok) {
-            throw new Error(`Telegram API error! status: ${response.status}`);
+            const errorText = await response.text();
+            out.error(`Telegram API HTTP error! Status: ${response.status}, Response: ${errorText}`);
+            throw new Error(`Telegram API error! status: ${response.status}, response: ${errorText}`);
         }
 
         const data = await response.json();
 
         if (!data.ok) {
+            out.error(`Telegram API returned error: ${JSON.stringify(data, null, 2)}`);
             throw new Error(`Telegram API returned error: ${data.description || 'Unknown error'}`);
         }
 
@@ -844,6 +841,66 @@ async function sendPhotoMessage({ insight }) {
 
     } catch (error) {
         out.error(`Error sending photo message: ${error.message}`);
+        throw error; // Re-throw to allow caller to handle
+    }
+}
+
+/**
+ * Sends a photo message to Telegram chat using an image buffer
+ * Uploads the image buffer directly to Telegram
+ * 
+ * @async
+ * @function sendPhotoMessageWithBuffer
+ * @param {Object} options - Message options
+ * @param {Object} options.insight - The insight object containing message data
+ * @param {string} options.insight.headline - The insight headline text
+ * @param {string} options.insight.id - The unique insight identifier
+ * @param {Buffer} options.imageBuffer - The image buffer to send
+ * @returns {Promise<Object>} Telegram API response object
+ * @throws {Error} When Telegram API request fails
+ */
+async function sendPhotoMessageWithBuffer({ insight, imageBuffer }) {
+    try {
+        const telegramApiUrl = `https://api.telegram.org/bot${config.Telegram.TOKEN}/sendPhoto`;
+
+        // Create caption with headline and read more link
+        const caption = addTestModePrefix(`${insight.headline}
+
+[Read more](${config.Polaris.INSIGHTS_URL}${insight.id})`);
+
+        const chatId = getChatId();
+        out.info(`Sending photo with custom buffer to Telegram chat: ${chatId} (${config.Telegram.TEST_MODE ? 'TEST' : 'PROD'})`);
+
+        // Prepare form data for file upload
+        const FormData = (await import('form-data')).default;
+        const form = new FormData();
+        form.append('chat_id', chatId);
+        form.append('photo', imageBuffer, 'insight-image.jpg');
+        form.append('caption', caption);
+        form.append('parse_mode', 'markdown');
+
+        const response = await fetch(telegramApiUrl, {
+            method: 'POST',
+            body: form
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            out.error(`Telegram API HTTP error! Status: ${response.status}, Response: ${errorText}`);
+            throw new Error(`Telegram API error! status: ${response.status}, response: ${errorText}`);
+        }
+
+        const data = await response.json();
+
+        if (!data.ok) {
+            out.error(`Telegram API returned error: ${JSON.stringify(data, null, 2)}`);
+            throw new Error(`Telegram API returned error: ${data.description || 'Unknown error'}`);
+        }
+
+        return data;
+
+    } catch (error) {
+        out.error(`Error sending photo message with buffer: ${error.message}`);
         throw error; // Re-throw to allow caller to handle
     }
 }
