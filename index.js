@@ -96,7 +96,9 @@ const config = {
         /** @type {number} Maximum number of insights to process per run */
         LIMIT: parseInt(process.env.INSIGHTS_LIMIT) || 7,
         /** @type {number} Minimum age in minutes before processing insights (prevents premature posting during editing) */
-        MINIMUM_AGE_MINUTES: parseInt(process.env.MINIMUM_AGE_MINUTES) || 10
+        MINIMUM_AGE_MINUTES: parseInt(process.env.MINIMUM_AGE_MINUTES) || 10,
+        /** @type {string} Default background color when color not found in colors.json */
+        DEFAULT_BACKGROUND_COLOR: process.env.DEFAULT_BACKGROUND_COLOR || 'black'
     }
 };
 
@@ -526,14 +528,21 @@ async function createColoredBackgroundImage({ colorName, overlayImageUrl, width 
         
         // Load colors and get RGB values
         const colors = loadColors();
-        const rgbString = colors[colorName];
+        let rgbString = colors[colorName];
+        let actualColorName = colorName;
         
         if (!rgbString) {
-            throw new Error(`Color "${colorName}" not found in colors.json`);
+            out.warn(`Color "${colorName}" not found in colors.json, using default color: ${config.Insights.DEFAULT_BACKGROUND_COLOR}`);
+            actualColorName = config.Insights.DEFAULT_BACKGROUND_COLOR;
+            rgbString = colors[actualColorName];
+            
+            if (!rgbString) {
+                throw new Error(`Default color "${actualColorName}" not found in colors.json`);
+            }
         }
         
         const [r, g, b] = parseRgbString(rgbString);
-        out.info(`Using RGB color: ${r}, ${g}, ${b} for ${colorName}`);
+        out.info(`Using RGB color: ${r}, ${g}, ${b} for ${actualColorName}`);
         
         // Download the overlay PNG image
         const overlayResponse = await fetch(overlayImageUrl);
@@ -574,7 +583,7 @@ async function createColoredBackgroundImage({ colorName, overlayImageUrl, width 
         // Convert canvas to JPEG buffer
         const imageBuffer = canvas.toBuffer('image/jpeg', { quality: 0.9 });
         
-        out.success(`Created colored background image with ${colorName} background and centered overlay`);
+        out.success(`Created colored background image with ${actualColorName} background and centered overlay`);
         return imageBuffer;
         
     } catch (error) {
